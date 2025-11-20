@@ -1,0 +1,55 @@
+{
+  "name": "electron-agent-tools",
+  "version": "0.1.0",
+  "description": "MCP-free, raw CDP tools to launch and drive Electron apps (CLI + tiny TS API).",
+  "type": "module",
+  "license": "MIT",
+  "authors": [
+    {
+      "name": "polarzero",
+      "email": "contact@polarzero.xyz",
+      "url": "https://polarzero.xyz"
+    }
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/lib/types.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./lib": {
+      "types": "./dist/lib/types.d.ts",
+      "default": "./dist/lib/index.js"
+    }
+  },
+  "main": "dist/index.js",
+  "types": "dist/lib/types.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "bin": {
+    "launch-electron": "./dist/cli/launch-electron.js",
+    "browser-tools": "./dist/cli/browser-tools.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "format": "biome format . --write",
+    "lint": "biome lint . --write --unsafe",
+    "lint:check": "biome ci .",
+    "test": "node --test **/*.spec.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "playwright": "^1.56.1"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.6",
+    "@types/electron": "^1.6.12",
+    "@types/node": "^24.10.1",
+    "electron": "^39.2.3",
+    "typescript": "^5.9.3"
+  }
+}

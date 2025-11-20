@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "compilerOptions": {
+    // Type checking
+    "strict": true,
+    "useDefineForClassFields": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "useUnknownInCatchVariables": true,
+    "noImplicitOverride": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitAny": true,
+
+    // JavaScript support
+    "allowJs": false,
+    "checkJs": false,
+
+    // Interop constraints
+    "esModuleInterop": false,
+    "allowSyntheticDefaultImports": false,
+    "forceConsistentCasingInFileNames": true,
+    "verbatimModuleSyntax": true,
+
+    // Resolution
+    "moduleResolution": "NodeNext",
+    "module": "NodeNext",
+    "target": "ES2022",
+
+    // Building
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "declarationMap": false,
+    "noEmitOnError": true
+  }
+}

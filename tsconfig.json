@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.base.json",
+  "include": ["src", "examples", "tests", "fixtures"],
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "electron-agent-tools": ["./dist/index.js"]
+    }
+  }
+}
