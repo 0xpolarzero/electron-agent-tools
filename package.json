@@ -20,16 +20,13 @@
   },
   "exports": {
     ".": {
-      "types": "./dist/lib/types.d.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
       "default": "./dist/index.js"
-    },
-    "./lib": {
-      "types": "./dist/lib/types.d.ts",
-      "default": "./dist/lib/index.js"
     }
   },
   "main": "dist/index.js",
-  "types": "dist/lib/types.d.ts",
+  "types": "dist/index.d.ts",
   "files": [
     "dist",
     "README.md",
