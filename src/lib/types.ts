@@ -2,7 +2,7 @@ import type { Page } from 'playwright'
 
 export type ConnectOptions = {
   wsUrl: string
-  pick?: { titleContains?: string | undefined; urlIncludes?: string | undefined }
+  pick?: { titleContains?: string | undefined; urlIncludes?: string | undefined } | undefined
 }
 
 export type Selector = {
