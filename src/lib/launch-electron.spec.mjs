@@ -9,12 +9,22 @@ import { promisify } from 'node:util'
 const execFileAsync = promisify(execFile)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const root = path.join(__dirname, '..', '..')
-const electronBin = path.join(root, 'node_modules/.bin/electron')
+const electronBin = (() => {
+  if (process.platform === 'win32') {
+    return path.join(root, 'node_modules', 'electron', 'dist', 'electron.exe')
+  }
+  return path.join(root, 'node_modules/.bin/electron')
+})()
+const pnpmBin = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
 
 let built = false
 const buildOnce = async () => {
   if (built) return
-  await execFileAsync('pnpm', ['build'], { cwd: root, env: { ...process.env, NODE_ENV: 'test' } })
+  await execFileAsync(pnpmBin, ['build'], {
+    cwd: root,
+    env: { ...process.env, NODE_ENV: 'test' },
+    shell: process.platform === 'win32', // Node 20+: .cmd requires shell on Windows
+  })
   built = true
 }
 
