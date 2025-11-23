@@ -2,4 +2,4 @@
 "electron-agent-tools": patch
 ---
 
-Harden stdio EPIPE handling by making the guard idempotent and swallowing uncaughtException EPIPEs so downstream apps can drop their manual pipe hacks.
+Auto-inject an EPIPE guard into spawned Electron/Node processes via NODE_OPTIONS and keep the guard idempotent so consumers no longer need local pipe hacks, while keeping CLI runs able to exit cleanly.

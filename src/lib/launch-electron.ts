@@ -177,6 +177,20 @@ export const launchElectron = async (opts: LaunchOptions): Promise<LaunchResult>
     artifactDir: opts.artifactDir,
     artifactPrefix: opts.artifactPrefix,
   })
+
+  // Inject an EPIPE guard into the child process via NODE_OPTIONS so consumers don't need to.
+  const guardPath = path.resolve(artifactRun.dir, 'swallow-epipe.cjs')
+  await writeFile(
+    guardPath,
+    [
+      "const swallow=(err)=>{if(err?.code==='EPIPE')return;throw err}",
+      "process.stdout?.on?.('error', swallow)",
+      "process.stderr?.on?.('error', swallow)",
+      "process.on('uncaughtException',(err)=>{if(err?.code==='EPIPE')return;throw err})",
+      '',
+    ].join('\n'),
+    'utf-8',
+  )
   const runLogger = openRunLogger(artifactRun.dir)
 
   const cdpPort = opts.cdpPort ?? (await findPort())
@@ -189,6 +203,9 @@ export const launchElectron = async (opts: LaunchOptions): Promise<LaunchResult>
     E2E_CDP_PORT: String(cdpPort),
     ...opts.env,
   }
+
+  const nodeOptionsParts = [env.NODE_OPTIONS, `--require ${guardPath}`].filter(Boolean)
+  env.NODE_OPTIONS = nodeOptionsParts.join(' ').trim()
   if (opts.headless) env.E2E_HEADLESS = '1'
 
   const child = spawn(opts.command, opts.args ?? [], {
@@ -214,7 +231,10 @@ export const launchElectron = async (opts: LaunchOptions): Promise<LaunchResult>
   child.stdout?.on('data', (chunk) => runLogger.logChunk('stdout', 'info', chunk))
   child.stderr?.on('data', (chunk) => runLogger.logChunk('stderr', 'error', chunk))
 
+  let streamsClosed = false
   const closeStreams = () => {
+    if (streamsClosed) return
+    streamsClosed = true
     try {
       child.stdout?.removeAllListeners()
       child.stderr?.removeAllListeners()
