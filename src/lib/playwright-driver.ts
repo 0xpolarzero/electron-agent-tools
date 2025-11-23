@@ -1,10 +1,9 @@
 import { EventEmitter } from 'node:events'
 import { mkdir } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { basename, dirname } from 'node:path'
 import type { CDPSession } from 'playwright'
 import {
   type Browser,
-  type ConsoleMessage,
   chromium,
   type Locator,
   type Page,
@@ -12,17 +11,8 @@ import {
   type Response,
 } from 'playwright'
 import type { AppErrorCode } from './error-codes.js'
-import type {
-  ConnectOptions,
-  ConsoleEntry,
-  ConsoleSource,
-  Driver,
-  FlushConsoleOptions,
-  IpcTraceEntry,
-  NetworkHarvest,
-  Selector,
-  SnapshotPerWorld,
-} from './types.js'
+import { type LogLevel, type LogSource, openRunLogger, type RunLogger } from './run-log.js'
+import type { ConnectOptions, ConsoleSource, Driver, Selector, SnapshotPerWorld } from './types.js'
 
 export class AppError extends Error {
   code: AppErrorCode
@@ -60,6 +50,14 @@ const classifyWorld = (auxData: Record<string, unknown> | undefined): ConsoleSou
   return 'unknown'
 }
 
+const mapConsoleLevel = (type: string | undefined): LogLevel => {
+  if (type === 'warning') return 'warn'
+  if (type === 'error') return 'error'
+  if (type === 'debug') return 'debug'
+  if (type === 'info') return 'info'
+  return 'log'
+}
+
 type ContextInfo = { id: number; world: ConsoleSource; frameId?: string | undefined }
 
 const serializeGlobals = (globals: Record<string, unknown>) => {
@@ -95,19 +93,20 @@ const installIpcTracerSource = `function installTracer() {
     if (globalThis.__eatIpcTraceInstalled__) return true;
     const ipcRenderer = (globalThis && globalThis.ipcRenderer) || (typeof require === 'function' ? require('electron').ipcRenderer : undefined);
     if (!ipcRenderer) return false;
-    const buffer = [];
     const now = () => Date.now();
-    const record = (entry) => buffer.push({ ...entry, ts: now() });
+    const emit = (entry) => {
+      try { console.info('__EAT_IPC__ ' + JSON.stringify({ ...entry, ts: now() })); } catch {}
+    };
 
     const origSend = ipcRenderer.send.bind(ipcRenderer);
     ipcRenderer.send = (channel, ...args) => {
       const start = now();
       try {
         const result = origSend(channel, ...args);
-        record({ direction: 'renderer->main', kind: 'send', channel, payload: args, durationMs: now() - start });
+        emit({ direction: 'renderer->main', kind: 'send', channel, payload: args, durationMs: now() - start });
         return result;
       } catch (error) {
-        record({ direction: 'renderer->main', kind: 'send', channel, payload: args, durationMs: now() - start, error: error?.message ?? String(error) });
+        emit({ direction: 'renderer->main', kind: 'send', channel, payload: args, durationMs: now() - start, error: error?.message ?? String(error) });
         throw error;
       }
     };
@@ -118,10 +117,10 @@ const installIpcTracerSource = `function installTracer() {
         const start = now();
         try {
           const result = await origInvoke(channel, ...args);
-          record({ direction: 'renderer->main', kind: 'invoke', channel, payload: args, durationMs: now() - start, result });
+          emit({ direction: 'renderer->main', kind: 'invoke', channel, payload: args, durationMs: now() - start, result });
           return result;
         } catch (error) {
-          record({ direction: 'renderer->main', kind: 'invoke', channel, payload: args, durationMs: now() - start, error: error?.message ?? String(error) });
+          emit({ direction: 'renderer->main', kind: 'invoke', channel, payload: args, durationMs: now() - start, error: error?.message ?? String(error) });
           throw error;
         }
       };
@@ -130,21 +129,17 @@ const installIpcTracerSource = `function installTracer() {
     const origOn = ipcRenderer.on.bind(ipcRenderer);
     ipcRenderer.on = (channel, listener) => {
       const wrapped = (_event, ...args) => {
-        try { record({ direction: 'main->renderer', kind: 'event', channel, payload: args }); } catch {}
+        emit({ direction: 'main->renderer', kind: 'event', channel, payload: args });
         return listener(_event, ...args);
       };
       return origOn(channel, wrapped);
     };
 
-    globalThis.__eatFlushIpcTrace__ = () => {
-      const copy = buffer.slice();
-      buffer.length = 0;
-      return copy;
-    };
     globalThis.__eatIpcTraceInstalled__ = true;
     return true;
   } catch (error) {
-    return { __error: error?.message ?? String(error) };
+    try { console.error('__EAT_IPC__ ' + JSON.stringify({ error: error?.message ?? String(error) })); } catch {}
+    return false;
   }
 }`
 
@@ -199,41 +194,32 @@ class PlaywrightDriver implements Driver {
   #page: Page
   #browserSession: CDPSession | null = null
   #pageSessions: Map<Page, { session: CDPSession; contexts: Map<number, ContextInfo> }> = new Map()
-  #consoleEvents: ConsoleEntry[] = []
-  // biome-ignore lint/correctness/noUnusedPrivateClassMembers: Bug in biome
-  #network: NetworkHarvest = { failed: [], errorResponses: [] }
-  #ipcTracingEnabled = false
   #emitter = new EventEmitter()
   #injectors: Array<{
     worlds: Set<'renderer' | 'isolated' | 'preload'>
     payload: Record<string, { kind: 'fn' | 'value'; source?: string; value?: unknown }>
   }> = []
+  #logger: RunLogger | null
   #listeners = {
-    console: (event: ConsoleMessage) => {
-      this.#consoleEvents.push({
-        source: 'renderer',
-        type: event.type(),
-        text: event.text(),
-        ts: Date.now(),
-      })
-    },
     pageerror: (error: Error) => {
-      this.#consoleEvents.push({
-        source: 'renderer',
-        type: 'error',
-        text: error.message,
-        ts: Date.now(),
-      })
+      this.#log('renderer', 'error', error.message)
     },
     requestfailed: (request: Request) => {
       const url = request.url()
-      if (url) this.#network.failed.push(url)
+      if (url) {
+        this.#log('network', 'warn', 'request-failed', {
+          url,
+          method: request.method(),
+          error: request.failure()?.errorText,
+        })
+      }
     },
     response: (response: Response) => {
       if (response.status() >= 400) {
-        this.#network.errorResponses.push({
+        this.#log('network', 'warn', 'response>=400', {
           url: response.url(),
           status: response.status(),
+          method: response.request().method(),
         })
       }
     },
@@ -241,10 +227,15 @@ class PlaywrightDriver implements Driver {
 
   #wsUrl: string
 
-  constructor(browser: Browser, page: Page, wsUrl: string) {
+  constructor(browser: Browser, page: Page, wsUrl: string, logger: RunLogger | null) {
     this.#browser = browser
     this.#page = page
     this.#wsUrl = wsUrl
+    this.#logger = logger
+  }
+
+  #log(source: LogSource, level: LogLevel, message: string, meta?: Record<string, unknown>) {
+    this.#logger?.log(source, level, message, meta)
   }
 
   // biome-ignore lint/correctness/noUnusedPrivateClassMembers: Bug in biome
@@ -255,12 +246,14 @@ class PlaywrightDriver implements Driver {
   }
 
   #wireEvents(page: Page) {
+    page.on('pageerror', this.#listeners.pageerror)
     page.on('requestfailed', this.#listeners.requestfailed)
     page.on('response', this.#listeners.response)
   }
 
   #unwireEvents(page?: Page) {
     if (!page) return
+    page.off('pageerror', this.#listeners.pageerror)
     page.off('requestfailed', this.#listeners.requestfailed)
     page.off('response', this.#listeners.response)
   }
@@ -298,14 +291,14 @@ class PlaywrightDriver implements Driver {
       }
       // apply persistent injectors for this world
       this.#applyInjectorsToContext(session, ctx?.id as number, world).catch(() => {})
-      if (this.#ipcTracingEnabled && world === 'preload') {
+      if (world === 'preload') {
         this.#installIpcTracer(session, ctx?.id as number).catch(() => {})
       }
     })
 
     session.on('Runtime.consoleAPICalled', (event) => {
       const ctxInfo = contexts.get(event.executionContextId ?? -1)
-      const source = ctxInfo?.world ?? 'unknown'
+      let source = ctxInfo?.world ?? 'unknown'
       const text = (event.args ?? [])
         .map((arg) =>
           arg?.value !== undefined ? arg.value : (arg?.description ?? arg?.unserializableValue),
@@ -321,15 +314,40 @@ class PlaywrightDriver implements Driver {
               : {}),
           }
         : undefined
-      const entry = {
-        source,
-        type: event.type ?? 'log',
-        text,
-        ts: Math.round((event.timestamp ?? Date.now() / 1000) * 1000),
-        args: (event.args ?? []).map((arg) => arg?.value ?? arg?.description),
-      } as const satisfies ConsoleEntry
-      if (location) (entry as ConsoleEntry).location = location
-      this.#consoleEvents.push(entry)
+      const raw = text.toString()
+      const ipcPrefix = '__EAT_IPC__'
+      if (raw.startsWith(ipcPrefix)) {
+        const payload = raw.slice(ipcPrefix.length).trimStart()
+        try {
+          const parsed = JSON.parse(payload) as {
+            direction?: string
+            kind?: string
+            channel?: string
+            durationMs?: number
+            error?: string
+            result?: unknown
+            payload?: unknown
+          }
+          this.#log('ipc', parsed.error ? 'error' : 'info', 'ipc-trace', {
+            direction: parsed.direction,
+            kind: parsed.kind,
+            channel: parsed.channel,
+            durationMs: parsed.durationMs,
+            error: parsed.error,
+          })
+        } catch {
+          this.#log('ipc', 'info', raw)
+        }
+        return
+      }
+      if (location?.url?.includes('electron/js2c/renderer_init')) {
+        source = 'preload'
+      }
+      this.#log(source as LogSource, mapConsoleLevel(event.type), raw, {
+        url: location?.url,
+        line: location?.lineNumber,
+        column: location?.columnNumber,
+      })
     })
 
     session.on('Log.entryAdded', (event) => {
@@ -345,16 +363,14 @@ class PlaywrightDriver implements Driver {
               : {}),
           }
         : undefined
-      const entry = {
-        source: classifyWorld(
-          event?.entry?.source === 'worker' ? { type: 'worker' } : { type: 'renderer' },
-        ),
-        type: event.entry.level,
-        text: event.entry.text,
-        ts: Math.round(event.entry.timestamp * 1000),
-      } as const satisfies ConsoleEntry
-      if (location) (entry as ConsoleEntry).location = location
-      this.#consoleEvents.push(entry)
+      const source = classifyWorld(
+        event?.entry?.source === 'worker' ? { type: 'worker' } : { type: 'renderer' },
+      )
+      this.#log(source as LogSource, mapConsoleLevel(event.entry.level), event.entry.text, {
+        url: location?.url,
+        line: location?.lineNumber,
+        column: location?.columnNumber,
+      })
     })
 
     await session.send('Runtime.enable')
@@ -365,11 +381,13 @@ class PlaywrightDriver implements Driver {
     page.on('framenavigated', (frame) => {
       if (frame === page.mainFrame()) {
         this.#emitter.emit('renderer-reload')
+        this.#log('system', 'info', 'renderer-reload', { url: frame.url() })
       }
     })
 
     page.on('close', () => {
       this.#pageSessions.delete(page)
+      this.#log('system', 'info', 'page-closed')
     })
 
     this.#pageSessions.set(page, { session, contexts })
@@ -486,12 +504,12 @@ class PlaywrightDriver implements Driver {
     if (!this.#browserSession) return
 
     this.#browserSession.on('Runtime.consoleAPICalled', (event) => {
-      this.#consoleEvents.push({
-        source: 'main',
-        type: event?.type ?? 'log',
-        text: (event?.args ?? []).map((arg) => arg?.value ?? arg?.description ?? '').join(' '),
-        ts: Math.round((event?.timestamp ?? Date.now() / 1000) * 1000),
-      })
+      this.#log(
+        'main',
+        mapConsoleLevel(event?.type),
+        (event?.args ?? []).map((arg) => arg?.value ?? arg?.description ?? '').join(' '),
+        { ts: Math.round((event?.timestamp ?? Date.now() / 1000) * 1000) },
+      )
     })
 
     this.#browserSession.on('Log.entryAdded', (event) => {
@@ -507,14 +525,12 @@ class PlaywrightDriver implements Driver {
               : {}),
           }
         : undefined
-      const entry = {
-        source: 'main',
-        type: event.entry.level,
-        text: event.entry.text,
+      this.#log('main', mapConsoleLevel(event.entry.level), event.entry.text, {
         ts: Math.round(event.entry.timestamp * 1000),
-      } as const satisfies ConsoleEntry
-      if (location) (entry as ConsoleEntry).location = location
-      this.#consoleEvents.push(entry)
+        url: location?.url,
+        line: location?.lineNumber,
+        column: location?.columnNumber,
+      })
     })
 
     await this.#browserSession.send('Runtime.enable').catch(() => {})
@@ -539,6 +555,9 @@ class PlaywrightDriver implements Driver {
     const browser = await chromium.connectOverCDP(opts.wsUrl)
     const contexts = browser.contexts()
     const pages = contexts.flatMap((ctx) => ctx.pages())
+    const logger = opts.runLogPath
+      ? openRunLogger(dirname(opts.runLogPath), basename(opts.runLogPath))
+      : null
 
     if (pages.length === 0) {
       await browser.close()
@@ -558,8 +577,12 @@ class PlaywrightDriver implements Driver {
       throw new AppError('E_NO_PAGE', 'Unable to pick a renderer page')
     }
 
-    const driver = new PlaywrightDriver(browser, best.page, opts.wsUrl)
+    const driver = new PlaywrightDriver(browser, best.page, opts.wsUrl, logger)
     await driver.#init()
+    driver.#log('system', 'info', 'driver-connected', {
+      wsUrl: opts.wsUrl,
+      pageUrl: best.page.url(),
+    })
     return driver
   }
 
@@ -671,6 +694,7 @@ class PlaywrightDriver implements Driver {
     await ensureDir(path)
     try {
       await this.#page.screenshot({ path, fullPage })
+      this.#log('screenshot', 'info', 'screenshot', { path, fullPage })
     } catch (error) {
       throw new AppError('E_FS', 'Failed to capture screenshot', { error })
     }
@@ -793,29 +817,6 @@ class PlaywrightDriver implements Driver {
     return { url: best.url, title: best.title }
   }
 
-  async flushConsole(opts?: FlushConsoleOptions): Promise<ConsoleEntry[]> {
-    const { sources, sinceTs } = opts ?? {}
-    const filtered = this.#consoleEvents.filter((entry) => {
-      const sourceOk = sources ? sources.includes(entry.source) : true
-      const tsOk = sinceTs ? entry.ts >= sinceTs : true
-      return sourceOk && tsOk
-    })
-    const out = [...filtered]
-    // remove flushed entries
-    this.#consoleEvents = this.#consoleEvents.filter((entry) => !filtered.includes(entry))
-    return out
-  }
-
-  async flushNetwork(): Promise<NetworkHarvest> {
-    const out: NetworkHarvest = {
-      failed: [...this.#network.failed],
-      errorResponses: [...this.#network.errorResponses],
-    }
-    this.#network.failed = []
-    this.#network.errorResponses = []
-    return out
-  }
-
   async evalInRendererMainWorld<T = unknown>(
     fn: (...args: unknown[]) => T,
     arg?: unknown,
@@ -919,33 +920,6 @@ class PlaywrightDriver implements Driver {
           await this.#page.addInitScript(applyGlobalsSource, payload as never)
         } catch {}
       }
-    }
-  }
-
-  async enableIpcTracing(enabled = true): Promise<void> {
-    this.#ipcTracingEnabled = enabled
-    if (!enabled) return
-    const info = this.#getPageSession()
-    if (!info) return
-    for (const ctx of info.contexts.values()) {
-      if (ctx.world === 'preload') {
-        await this.#installIpcTracer(info.session, ctx.id)
-      }
-    }
-  }
-
-  async flushIpc(): Promise<IpcTraceEntry[]> {
-    try {
-      return await this.evalInPreload(() => {
-        const g = globalThis as Record<string, unknown>
-        const flusher = g.__eatFlushIpcTrace__
-        if (typeof flusher === 'function') {
-          return flusher()
-        }
-        return []
-      })
-    } catch {
-      return []
     }
   }
 
@@ -1073,6 +1047,8 @@ class PlaywrightDriver implements Driver {
     // hanging, so stick with the public API here.
     this.#unwireEvents(this.#page)
     await this.#browser.close()
+    this.#log('system', 'info', 'driver-close')
+    this.#logger?.close()
   }
 }
 

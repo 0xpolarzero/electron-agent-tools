@@ -45,7 +45,7 @@
     "release:changeset": "changeset",
     "release:version": "changeset version && pnpm install --no-frozen-lockfile",
     "release:publish": "pnpm build && changeset publish --provenance",
-    "test": "node --test \"src/**/*.spec.mjs\"",
+    "test": "node --test --test-concurrency=1 \"src/**/*.spec.mjs\"",
     "test:ci": "CI=1 E2E_HEADLESS=1 pnpm test",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "generate:docs": "node scripts/generate-docs.mjs"

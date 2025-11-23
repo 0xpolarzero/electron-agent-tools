@@ -2,8 +2,9 @@ import { writeFile } from 'node:fs/promises'
 import * as path from 'node:path'
 import { chromium } from 'playwright'
 
-import { ensureArtifactPath, prepareArtifactRun } from '../lib/artifacts.js'
+import { ensureArtifactPath, prepareOrReuseArtifactRun } from '../lib/artifacts.js'
 import { buildLocator, connectAndPick } from '../lib/playwright-driver.js'
+import { openRunLogger } from '../lib/run-log.js'
 import type { ArtifactOptions, Selector } from '../lib/types.js'
 
 type JsonInput = Record<string, unknown>
@@ -63,7 +64,8 @@ const artifactOpts = (payload: JsonInput): ArtifactOptions => {
   return opts
 }
 
-const prepareRun = async (payload: JsonInput) => prepareArtifactRun(artifactOpts(payload))
+const prepareRun = async (payload: JsonInput) =>
+  prepareOrReuseArtifactRun({ ...artifactOpts(payload), reuseLast: true })
 
 const listWindows = async (wsUrl: string) => {
   const browser = await chromium.connectOverCDP(wsUrl)
@@ -97,6 +99,12 @@ const run = async () => {
     typeof payload.timeoutMs === 'number' && payload.timeoutMs > 0
       ? payload.timeoutMs
       : defaultTimeout
+  const connectWithRun = async () => {
+    const run = await prepareRun(payload)
+    const runLogPath = path.join(run.dir, 'run.log')
+    const driver = await connectAndPick({ wsUrl, runLogPath })
+    return { run, runLogPath, driver }
+  }
 
   try {
     switch (sub) {
@@ -106,29 +114,10 @@ const run = async () => {
         printJson({ ok: true, data: { pages } })
         return
       }
-      case 'dom-snapshot': {
-        if (!wsUrl) throw new Error('wsUrl required')
-        const truncateAt =
-          typeof payload.truncateAt === 'number' ? (payload.truncateAt as number) : undefined
-        const driver = await connectAndPick({ wsUrl })
-        const outerHTML = await driver.dumpOuterHTML(truncateAt)
-        const page = driver.page
-        const title = page?.title ? await page.title().catch(() => '') : ''
-        const url = page?.url ? page.url() : ''
-        await driver.close()
-
-        const { dir } = await prepareRun(payload)
-        const outPath = path.join(dir, 'dom-snapshot.html')
-        await ensureArtifactPath(outPath)
-        await writeFile(outPath, outerHTML, 'utf-8')
-
-        printJson({ ok: true, data: { url, title, outerHTML } })
-        return
-      }
       case 'list-selectors': {
         if (!wsUrl) throw new Error('wsUrl required')
         const max = typeof payload.max === 'number' ? (payload.max as number) : undefined
-        const driver = await connectAndPick({ wsUrl })
+        const { driver } = await connectWithRun()
         const selectors = await driver.listSelectors(max)
         await driver.close()
         printJson({ ok: true, data: selectors })
@@ -136,7 +125,7 @@ const run = async () => {
       }
       case 'wait-text': {
         if (!wsUrl || typeof payload.text !== 'string') throw new Error('wsUrl and text required')
-        const driver = await connectAndPick({ wsUrl })
+        const { driver } = await connectWithRun()
         await driver.waitText(payload.text as string, timeoutMs)
         await driver.close()
         printJson({ ok: true, data: { visible: true } })
@@ -144,7 +133,7 @@ const run = async () => {
       }
       case 'press': {
         if (!wsUrl || typeof payload.key !== 'string') throw new Error('wsUrl and key required')
-        const driver = await connectAndPick({ wsUrl })
+        const { driver } = await connectWithRun()
         const { key, ...sel } = payload as Selector & { key: string }
         await driver.press(key, Object.keys(sel).length ? (sel as Selector) : undefined)
         await driver.close()
@@ -153,7 +142,7 @@ const run = async () => {
       }
       case 'hover': {
         if (!wsUrl) throw new Error('wsUrl required')
-        const driver = await connectAndPick({ wsUrl })
+        const { driver } = await connectWithRun()
         await driver.hover(payload as Selector)
         await driver.close()
         printJson({ ok: true, data: { hovered: true } })
@@ -161,7 +150,7 @@ const run = async () => {
       }
       case 'scroll-into-view': {
         if (!wsUrl) throw new Error('wsUrl required')
-        const driver = await connectAndPick({ wsUrl })
+        const { driver } = await connectWithRun()
         await driver.scrollIntoView(payload as Selector)
         await driver.close()
         printJson({ ok: true, data: { scrolled: true } })
@@ -171,7 +160,7 @@ const run = async () => {
         if (!wsUrl || typeof payload.filePath !== 'string') {
           throw new Error('wsUrl and filePath required')
         }
-        const driver = await connectAndPick({ wsUrl })
+        const { driver } = await connectWithRun()
         const { filePath, ...sel } = payload as Selector & { filePath: string }
         await driver.upload(sel, filePath)
         await driver.close()
@@ -180,7 +169,7 @@ const run = async () => {
       }
       case 'click': {
         if (!wsUrl) throw new Error('wsUrl required')
-        const driver = await connectAndPick({ wsUrl })
+        const { driver } = await connectWithRun()
         await driver.click(payload as Selector)
         await driver.close()
         printJson({ ok: true, data: { clicked: true } })
@@ -191,7 +180,7 @@ const run = async () => {
         if (!wsUrl || !hasValue) {
           throw new Error('wsUrl and value required')
         }
-        const driver = await connectAndPick({ wsUrl })
+        const { driver } = await connectWithRun()
         await driver.type(payload as Selector & { value: string; clearFirst?: boolean })
         await driver.close()
         printJson({ ok: true, data: { typed: true } })
@@ -199,7 +188,7 @@ const run = async () => {
       }
       case 'get-dom': {
         if (!wsUrl || typeof payload.as !== 'string') throw new Error('wsUrl and as required')
-        const driver = await connectAndPick({ wsUrl })
+        const { driver } = await connectWithRun()
         const locatorSel = payload as Selector & { as: 'innerHTML' | 'textContent' }
         const page = driver.page
         if (!page) throw new Error('E_NO_PAGE')
@@ -217,29 +206,15 @@ const run = async () => {
       case 'screenshot': {
         if (!wsUrl) throw new Error('wsUrl required')
         const fullPage = payload.fullPage !== false
+        const { run, driver } = await connectWithRun()
         const pathArg =
           typeof payload.path === 'string'
             ? (payload.path as string)
-            : path.join((await prepareRun(payload)).dir, 'page.png')
+            : path.join(run.dir, 'page.png')
         await ensureArtifactPath(pathArg)
-        const driver = await connectAndPick({ wsUrl })
         await driver.screenshot(pathArg, fullPage)
         await driver.close()
         printJson({ ok: true, data: { path: pathArg } })
-        return
-      }
-      case 'console-harvest': {
-        if (!wsUrl) throw new Error('wsUrl required')
-        const driver = await connectAndPick({ wsUrl })
-        const events = await driver.flushConsole()
-        await driver.close()
-
-        const { dir } = await prepareRun(payload)
-        const outPath = path.join(dir, 'console-harvest.json')
-        await ensureArtifactPath(outPath)
-        await writeFile(outPath, JSON.stringify(events, null, 2), 'utf-8')
-
-        printJson({ ok: true, data: { events } })
         return
       }
       case 'snapshot-globals': {
@@ -247,25 +222,10 @@ const run = async () => {
           throw new Error('wsUrl and names[] required')
         }
         const names = (payload as { names: unknown }).names as string[]
-        const driver = await connectAndPick({ wsUrl })
+        const { driver } = await connectWithRun()
         const snapshots = await driver.snapshotGlobals(names)
         await driver.close()
         printJson({ ok: true, data: { snapshots } })
-        return
-      }
-      case 'ipc-harvest': {
-        if (!wsUrl) throw new Error('wsUrl required')
-        const driver = await connectAndPick({ wsUrl })
-        await driver.enableIpcTracing(true)
-        const events = await driver.flushIpc()
-        await driver.close()
-
-        const { dir } = await prepareRun(payload)
-        const outPath = path.join(dir, 'ipc-harvest.json')
-        await ensureArtifactPath(outPath)
-        await writeFile(outPath, JSON.stringify(events, null, 2), 'utf-8')
-
-        printJson({ ok: true, data: { events } })
         return
       }
       case 'dump-dom': {
@@ -273,29 +233,17 @@ const run = async () => {
         const sel = typeof payload.selector === 'string' ? (payload.selector as string) : undefined
         const truncateAt =
           typeof payload.truncateAt === 'number' ? (payload.truncateAt as number) : undefined
-        const driver = await connectAndPick({ wsUrl })
+        const { run, driver } = await connectWithRun()
         const out = await driver.dumpDOM(sel, truncateAt)
         await driver.close()
-        const { dir } = await prepareRun(payload)
-        const outPath = path.join(dir, 'dom-dump.html')
+        const outPath = path.join(run.dir, 'dom-dump.html')
         await ensureArtifactPath(outPath)
         await writeFile(outPath, out.html, 'utf-8')
+        const logger = openRunLogger(run.dir)
+        logger.log('domdump', 'info', 'dom-dump', { path: outPath, selector: sel })
+        logger.close()
 
         printJson({ ok: true, data: out })
-        return
-      }
-      case 'network-harvest': {
-        if (!wsUrl) throw new Error('wsUrl required')
-        const driver = await connectAndPick({ wsUrl })
-        const harvest = await driver.flushNetwork()
-        await driver.close()
-
-        const { dir } = await prepareRun(payload)
-        const outPath = path.join(dir, 'network-harvest.json')
-        await ensureArtifactPath(outPath)
-        await writeFile(outPath, JSON.stringify(harvest, null, 2), 'utf-8')
-
-        printJson({ ok: true, data: harvest })
         return
       }
       case 'wait-for-window': {
@@ -304,7 +252,7 @@ const run = async () => {
           typeof payload.pick === 'object' && payload.pick
             ? (payload.pick as { titleContains?: string; urlIncludes?: string })
             : undefined
-        const driver = await connectAndPick({ wsUrl })
+        const { driver } = await connectWithRun()
         const win = await driver.waitForWindow(timeoutMs, pick)
         await driver.close()
         printJson({ ok: true, data: win })
@@ -316,7 +264,7 @@ const run = async () => {
           typeof payload.pick === 'object' && payload.pick
             ? (payload.pick as { titleContains?: string; urlIncludes?: string })
             : {}
-        const driver = await connectAndPick({ wsUrl })
+        const { driver } = await connectWithRun()
         const win = await driver.switchWindow(pick)
         await driver.close()
         printJson({ ok: true, data: win })

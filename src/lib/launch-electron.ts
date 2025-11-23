@@ -1,5 +1,4 @@
 import { execFile, spawn } from 'node:child_process'
-import { closeSync, openSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import * as path from 'node:path'
@@ -7,6 +6,7 @@ import * as path from 'node:path'
 import { prepareArtifactRun } from './artifacts.js'
 import type { LaunchErrorCode } from './error-codes.js'
 import { getWsUrl } from './get-ws-url.js'
+import { openRunLogger } from './run-log.js'
 import type { LaunchOptions, LaunchResult } from './types.js'
 
 export class LaunchError extends Error {
@@ -177,25 +177,9 @@ export const launchElectron = async (opts: LaunchOptions): Promise<LaunchResult>
     artifactDir: opts.artifactDir,
     artifactPrefix: opts.artifactPrefix,
   })
+  const runLogger = openRunLogger(artifactRun.dir)
 
   const cdpPort = opts.cdpPort ?? (await findPort())
-
-  const stdoutPath = path.join(artifactRun.dir, 'electron.stdout.log')
-  const stderrPath = path.join(artifactRun.dir, 'electron.stderr.log')
-  const stdoutFd = openSync(stdoutPath, 'a')
-  const stderrFd = openSync(stderrPath, 'a')
-
-  let logsClosed = false
-  const closeLogs = () => {
-    if (logsClosed) return
-    logsClosed = true
-    try {
-      closeSync(stdoutFd)
-    } catch {}
-    try {
-      closeSync(stderrFd)
-    } catch {}
-  }
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -210,7 +194,7 @@ export const launchElectron = async (opts: LaunchOptions): Promise<LaunchResult>
   const child = spawn(opts.command, opts.args ?? [], {
     cwd: opts.cwd ?? process.cwd(),
     env,
-    stdio: ['ignore', stdoutFd, stderrFd],
+    stdio: ['ignore', 'pipe', 'pipe'],
     detached: true,
   })
 
@@ -218,6 +202,25 @@ export const launchElectron = async (opts: LaunchOptions): Promise<LaunchResult>
 
   if (debug) {
     process.stderr.write(`DEBUG_LAUNCH start pid=${child.pid} cdpPort=${cdpPort}\n`)
+  }
+
+  runLogger.log('system', 'info', 'run-start', {
+    command: opts.command,
+    args: (opts.args ?? []).join(' '),
+    cdpPort,
+    pid: child.pid,
+  })
+
+  child.stdout?.on('data', (chunk) => runLogger.logChunk('stdout', 'info', chunk))
+  child.stderr?.on('data', (chunk) => runLogger.logChunk('stderr', 'error', chunk))
+
+  const closeStreams = () => {
+    try {
+      child.stdout?.removeAllListeners()
+      child.stderr?.removeAllListeners()
+      child.stdout?.destroy()
+      child.stderr?.destroy()
+    } catch {}
   }
 
   let cdpReady = false
@@ -230,7 +233,7 @@ export const launchElectron = async (opts: LaunchOptions): Promise<LaunchResult>
       reject(
         new LaunchError('E_SPAWN', 'Failed to spawn Electron', {
           error: err,
-          stderrPath,
+          runLogPath: runLogger.path,
         }),
       )
     }
@@ -241,7 +244,7 @@ export const launchElectron = async (opts: LaunchOptions): Promise<LaunchResult>
         new LaunchError('E_EXIT_EARLY', 'Electron exited before CDP became ready', {
           code,
           signal,
-          stderrPath,
+          runLogPath: runLogger.path,
         }),
       )
     }
@@ -324,7 +327,12 @@ export const launchElectron = async (opts: LaunchOptions): Promise<LaunchResult>
         } catch {}
       }
     }
-    closeLogs()
+    runLogger.log('system', 'info', 'run-end', {
+      pid: child.pid,
+      electronPid: electronPidResolved,
+    })
+    closeStreams()
+    runLogger.close()
   }
 
   try {
@@ -337,6 +345,12 @@ export const launchElectron = async (opts: LaunchOptions): Promise<LaunchResult>
 
     await wait(300)
     electronPidResolved = child.pid ? await resolveElectronPid(child.pid) : undefined
+    runLogger.log('system', 'info', 'cdp-ready', {
+      wsUrl,
+      cdpPort,
+      pid: child.pid,
+      electronPid: electronPidResolved,
+    })
     const launchFile = path.join(artifactRun.dir, 'launch.json')
     await writeFile(
       launchFile,
@@ -347,12 +361,14 @@ export const launchElectron = async (opts: LaunchOptions): Promise<LaunchResult>
           electronPid: electronPidResolved,
           cdpPort,
           artifactDir: artifactRun.dir,
+          runLogPath: runLogger.path,
         },
         null,
         2,
       ),
       'utf-8',
     )
+    runLogger.log('system', 'info', 'launch-file-written', { path: launchFile })
 
     return {
       wsUrl,
@@ -360,6 +376,7 @@ export const launchElectron = async (opts: LaunchOptions): Promise<LaunchResult>
       electronPid: electronPidResolved,
       cdpPort,
       artifactDir: artifactRun.dir,
+      runLogPath: runLogger.path,
       launchFile,
       quit,
     }
@@ -373,6 +390,6 @@ export const launchElectron = async (opts: LaunchOptions): Promise<LaunchResult>
     if (error instanceof LaunchError) throw error
     throw new LaunchError('E_CDP_TIMEOUT', 'Timed out waiting for CDP', { error })
   } finally {
-    closeLogs()
+    closeStreams()
   }
 }

@@ -3,9 +3,10 @@
 Playwright-powered CLI and TypeScript helpers to launch, attach to, and drive Electron apps over CDP. Built for scripting, CI, and LLM agents with JSON-in/JSON-out commands.
 
 ## What it does
-- `browser-tools <subcmd>`: JSON-only CLI to click, type, wait, screenshot, and harvest console/network.
+- `browser-tools <subcmd>`: JSON-only CLI to click, type, wait, screenshot, dump DOM, and stream logs.
 - `launch-electron start|quit`: spawn an Electron app with CDP enabled and collect artifacts.
 - Tiny API: `connectAndPick(opts)` and `getWsUrl({ port })` wrap `chromium.connectOverCDP` and target selection.
+- Unified logs: every run writes `.e2e-artifacts/<prefix>/run.log` containing stdout/stderr, renderer/preload/main console, IPC, network, and lifecycle lines.
 
 ## Quickstart
 1) Install: `pnpm add -D electron-agent-tools`
@@ -47,11 +48,10 @@ await quit()
 Check `examples/` for a ready-to-run smoke test against the bundled fixture app.
 
 ## Debugging helpers
-- **Tagged console harvest**: `driver.flushConsole({ sources: ['main','preload','renderer','isolated'] })` returns structured entries across worlds; `browser-tools console-harvest` writes them to artifacts.
+- **Unified run.log**: each run emits `[ISO] [source] [level] message` lines across stdout/stderr, console (renderer/preload/main/isolated), IPC traces, network failures, screenshots, and DOM dumps.
 - **World-aware eval**: `driver.evalInPreload`, `evalInRendererMainWorld`, `evalInIsolatedWorld` let you probe exactly where globals live.
 - **Lifecycle hooks**: `onRendererReload` / `onPreloadReady` plus `waitForBridge()` for contextIsolation + Vite reloads.
 - **Deterministic injection**: `injectGlobals(obj, { persist: true })` replays helpers into renderer + preload on every navigation.
-- **IPC tracing**: `enableIpcTracing()` + `flushIpc()` capture channel/payload/duration; `browser-tools ipc-harvest` writes them to disk.
 - **State snapshots**: `snapshotGlobals(['foo','bar'])`, `dumpDOM(selector?)`, and `waitForTextAcrossReloads` help debug flaky UIs.
 - **DevTools in headless**: `getRendererInspectorUrl()` builds a `devtools://…` link for the current renderer target.
 

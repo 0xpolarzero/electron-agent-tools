@@ -1,4 +1,4 @@
-import { mkdir, rm, symlink } from 'node:fs/promises'
+import { mkdir, realpath, rm, symlink } from 'node:fs/promises'
 import * as path from 'node:path'
 
 import type { ArtifactOptions } from './types.js'
@@ -29,6 +29,36 @@ export const prepareArtifactRun = async (opts: ArtifactOptions = {}): Promise<Ar
   await mkdir(dir, { recursive: true })
   await markLastRun(root, dir)
   return { root, dir, prefix }
+}
+
+const resolveExistingRun = async (root: string): Promise<ArtifactRun | null> => {
+  const lastRun = path.join(root, 'last-run')
+  try {
+    const dir = await realpath(lastRun)
+    const prefix = path.basename(dir)
+    return { root, dir, prefix }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Reuses the last run when possible; otherwise prepares a fresh artifact run.
+ */
+export const prepareOrReuseArtifactRun = async (
+  opts: ArtifactOptions & { reuseLast?: boolean } = {},
+): Promise<ArtifactRun> => {
+  const root = opts.artifactDir ?? defaultDir
+  if (opts.artifactPrefix) {
+    return prepareArtifactRun({ artifactDir: root, artifactPrefix: opts.artifactPrefix })
+  }
+
+  if (opts.reuseLast) {
+    const existing = await resolveExistingRun(root)
+    if (existing) return existing
+  }
+
+  return prepareArtifactRun({ artifactDir: root })
 }
 
 export const ensureArtifactPath = async (targetPath: string): Promise<void> => {

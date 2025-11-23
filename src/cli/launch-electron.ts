@@ -116,6 +116,7 @@ const run = async () => {
             electronPid: result.electronPid ?? null,
             cdpPort: result.cdpPort,
             artifactDir: result.artifactDir,
+            runLogPath: result.runLogPath,
             launchFile: result.launchFile,
             quitHint: { pid: result.electronPid ?? result.pid, launchFile: result.launchFile },
           },
