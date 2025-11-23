@@ -1,5 +1,11 @@
 # electron-agent-tools
 
+## 0.2.2
+
+### Patch Changes
+
+- 27781d2: Always create a run logger in `connectAndPick`, defaulting to `.e2e-artifacts/last-run/run.log`, so renderer/preload/main/network/ipc logs are captured even when callers omit `runLogPath`.
+
 ## 0.2.1
 
 ### Patch Changes
