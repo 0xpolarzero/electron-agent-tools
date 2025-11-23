@@ -1,5 +1,11 @@
 # electron-agent-tools
 
+## 0.2.5
+
+### Patch Changes
+
+- a680721: Auto-inject an EPIPE guard into spawned Electron/Node processes via NODE_OPTIONS and keep the guard idempotent so consumers no longer need local pipe hacks, while keeping CLI runs able to exit cleanly.
+
 ## 0.2.4
 
 ### Patch Changes
