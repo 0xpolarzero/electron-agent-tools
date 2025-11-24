@@ -1,5 +1,12 @@
 # electron-agent-tools
 
+## 0.2.6
+
+### Patch Changes
+
+- 3340838: - add waitForValue helper to PlaywrightDriver for polling values across renderer/page contexts with timeouts
+  - export types + document API and add a contract test
+
 ## 0.2.5
 
 ### Patch Changes
